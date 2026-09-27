@@ -130,14 +130,14 @@ The same things work from the shell: `podkop-sub update|apply|check|restore|stat
 
 ## Versions
 
-The plugin is tied to a podkop version. A tag is a plain version — `0.0.2` — and the podkop a
+The plugin is tied to a podkop version. A tag is a plain version — `0.0.3` — and the podkop a
 package was built for is stamped into its file name, so `install.sh` picks the release by its
 packages rather than by its tag. A mismatch is a warning, never a refusal: the installer asks before
 continuing and the page shows a notice.
 
 | podkop | plugin |
 |---|---|
-| 0.7.22 | `0.0.2` |
+| 0.7.22 | `0.0.3` |
 
 Subscription URLs live in `/etc/config/podkop-sub` and never in podkop's own config — `podkop
 show_config` is what people paste into bug reports, and it would leak them. The debug log masks the

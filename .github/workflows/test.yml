@@ -23,6 +23,7 @@ jobs:
       - run: >
           shellcheck -s dash
           luci-app-podkop-sub/root/usr/bin/podkop-sub
+          luci-app-podkop-sub/root/usr/share/podkop-sub/lib/*.sh
           luci-app-podkop-sub/root/etc/init.d/podkop-sub
           luci-app-podkop-sub/root/etc/uci-defaults/50_podkop-sub
           install.sh uninstall.sh build.sh tests/*.sh

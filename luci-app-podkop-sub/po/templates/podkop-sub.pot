@@ -308,7 +308,7 @@ msgid "Max failures"
 msgstr ""
 
 #: htdocs/luci-static/resources/view/podkop-sub/subscriptions.js:556
-msgid "Failed checks in a row before the section is refreshed."
+msgid "How many nodes may fail in one check before it stops probing."
 msgstr ""
 
 #: htdocs/luci-static/resources/view/podkop-sub/subscriptions.js:572

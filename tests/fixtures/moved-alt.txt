@@ -1,0 +1,2 @@
+hy2://altpass@node17.example.net:8443?sni=cdn.example.com&insecure=1#🇫🇮 FI Helsinki
+socks5://user:pass@node8.example.net:1080#SG Singapore

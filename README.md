@@ -82,20 +82,30 @@ at, not a random one. A URLTest section chooses for itself, so there it tests th
 
 1. **It answers.** Done.
 2. **It does not.** The plugin walks the section's other nodes in order, testing each, and switches
-   the selector to the first that answers. It remembers that this node is *its* choice, not yours.
-3. **Your node answers again.** The selector goes back to it by itself.
-4. **No node in the section answers.** The subscriptions feeding that section are re-read and
-   applied. Node identity is the **title**, so a server that changed address but kept its name is
-   still recognised as the one you picked.
-5. **Still nothing.** The plugin looks through the rest of the subscription for a node you did not
-   pick, checking each for reachability *without touching podkop*, and borrows the first one that
-   answers: it is written into the section, podkop restarts once, and the node is verified properly.
-6. **One of your own nodes comes back.** The borrowed node is removed and the section returns to
+   the selector to the first that answers. It remembers that this node is *its* choice, not yours,
+   and stays on it while it answers: the other nodes are tried again only if it dies too.
+3. **Then the subscriptions are re-read** — without touching podkop. Node identity is the
+   **title**, so your node is found in the fresh list even if the provider moved it, and the plugin
+   checks its fresh link for reachability itself — changed or not, the server may simply be back.
+4. **The fresh link answers.** It is written into podkop — the one restart of the whole sequence —
+   and the selector goes back to your node. If it is the very link podkop already has, there is
+   nothing to write: podkop itself is asked whether the server is back, and if it is, the selector
+   returns to it without a restart. If the link does not answer, nothing changes: the reserve keeps
+   the traffic and the next check tries again.
+5. **Your node answers again** on its own. The selector goes back to it by itself.
+6. **No node in the section answers.** Step 3 runs for every node the check tried, and with nothing
+   left to lose, even a new link that cannot be checked (hy2) is applied. If none of them revives
+   and the check tried the whole section, the plugin looks through the rest of the subscription for
+   a node you did not pick, checking each for reachability *without touching podkop*, and borrows
+   the first one that answers: it is written into the section, podkop restarts once, and the node
+   is verified properly.
+7. **One of your own nodes comes back.** The borrowed node is removed and the section returns to
    your selection alone.
 
 Every step is written to the debug log with the node's name, and the page shows a notice while a
-section is running on anything other than your own choice. A subscription is re-downloaded only in
-step 4, or when you press Refresh or Update now — a working setup is never touched.
+section is running on anything other than your own choice. A subscription is re-downloaded only
+when a node stopped answering (once per check at most), or when you press Refresh or Update now,
+and podkop restarts only for a link that answered — a working setup is never touched.
 
 All of this is what happens with no one watching. The moment you step in — Save & Apply, Update now,
 or moving the selector in podkop's dashboard — whatever you leave behind is the truth: the plugin
@@ -113,8 +123,8 @@ links, last update, expiry and traffic left when the provider reports them). Bel
 configuration type of every targeted section, *Update now*, and *Show log*.
 
 **Settings** — the auto-update service (running state, Start / Stop / Restart) and its knobs: check
-interval, ping timeout, and how many failed checks in a row refresh a section. Stopping the service
-only turns off the background checks; *Update now* and *Save & Apply* keep working.
+interval, ping timeout, and how many nodes may fail in one check before it stops probing. Stopping
+the service only turns off the background checks; *Update now* and *Save & Apply* keep working.
 
 The same things work from the shell: `podkop-sub update|apply|check|restore|status|logs`.
 

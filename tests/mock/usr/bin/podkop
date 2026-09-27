@@ -2,8 +2,8 @@
 # shellcheck shell=dash
 # podkop stand-in: only the calls podkop-sub makes. Every call is recorded in $MOCK_CALLS.
 # MOCK_PODKOP_DOWN=1 answers like a dead clash API; a non-numeric MOCK_DELAY fails every latency
-# test and MOCK_DEAD fails it for the tags it lists. set_group_proxy updates $MOCK_PROXIES, so
-# the selector really moves.
+# test and MOCK_DEAD fails it for the tags it lists; MOCK_DEAD_ONCE fails only a tag's first test.
+# set_group_proxy updates $MOCK_PROXIES, so the selector really moves.
 [ -n "$MOCK_CALLS" ] && echo "podkop $*" >> "$MOCK_CALLS"
 
 case "$1" in
@@ -19,6 +19,14 @@ case "$1" in
                 fi
                 ;;
             get_proxy_latency)
+                case " $MOCK_DEAD_ONCE " in
+                    *" $3 "*)
+                        if [ "$(grep -c "get_proxy_latency $3 " "$MOCK_CALLS")" -le 1 ]; then
+                            echo '{"message":"An error occurred in the delay test"}'
+                            exit 1
+                        fi
+                        ;;
+                esac
                 case " $MOCK_DEAD " in
                     *" $3 "*)
                         echo '{"message":"An error occurred in the delay test"}'

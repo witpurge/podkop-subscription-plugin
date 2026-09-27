@@ -235,8 +235,8 @@ msgstr "Сколько миллисекунд ждать ответа от уз�
 msgid "Max failures"
 msgstr "Максимум неудач"
 
-msgid "Failed checks in a row before the section is refreshed."
-msgstr "Сколько неудачных проверок подряд до обновления секции."
+msgid "How many nodes may fail in one check before it stops probing."
+msgstr "Сколько узлов может не ответить за одну проверку, прежде чем она остановится."
 
 #, javascript-format
 msgid "This plugin was built for podkop %s, but podkop %s is installed. Everything still works, but instabilities are possible."

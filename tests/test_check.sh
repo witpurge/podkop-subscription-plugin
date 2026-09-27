@@ -86,8 +86,8 @@ reset main-3-out
 MOCK_DEAD='main-3-out'
 export MOCK_DEAD
 podkop-sub check > /dev/null 2>&1
-assert_eq "2" "$(grep -c 'get_proxy_latency main-' "$MOCK_CALLS")" \
-    "the dead node is tried, then the next one in list order"
+assert_eq "3" "$(grep -c 'get_proxy_latency main-' "$MOCK_CALLS")" \
+    "the dead node is tried, then the next one in list order, then the dead one for the fresh list"
 assert_cmd "the failure is logged with the node name" grep -qF "main: $DE did not answer" "$LOG"
 assert_cmd "so is the node that answered" grep -qF "main: $NL answered in" "$LOG"
 assert_cmd "and so is the switch" grep -qF "main: switched to $NL" "$LOG"
@@ -97,6 +97,13 @@ assert_eq "main-1-out" "$(now_at)" "podkop now points at the working node"
 assert_eq "$NL" "$(sec main failover)" "the emergency pick is recorded as ours"
 assert_eq "$DE" "$(sec main selected)" "the user's own pick is left untouched"
 assert_eq "ok" "$(sec main status)" "a section that failed over is ok, not failed"
+assert_eq "2" "$(fetches)" "his node dying re-reads the subscriptions feeding the section"
+assert_cmd "even a link the subscription did not change is probed, the server may be back" \
+    grep -qF 'curl probe node3.example.net:443' "$MOCK_CALLS"
+assert_cmd "an open port is not enough while podkop still cannot get through" \
+    grep -qF "main: $DE is reachable, but podkop still cannot get through it" "$LOG"
+assert_eq "" "$(grep 'podkop-init restart' "$MOCK_CALLS")" \
+    "an unchanged list leaves podkop running on the reserve"
 
 # our own pick must not be adopted as his by a later pass
 : > "$MOCK_CALLS"
@@ -104,6 +111,19 @@ podkop-sub check > /dev/null 2>&1
 assert_eq "$DE" "$(sec main selected)" "a second pass still does not adopt our pick as his"
 assert_cmd "the user's pick is probed first while we hold the selector" \
     grep -qF 'get_proxy_latency main-3-out 2000' "$MOCK_CALLS"
+assert_eq "get_proxy_latency main-3-out|get_proxy_latency main-1-out|" \
+    "$(grep -o 'get_proxy_latency main-[0-9]*-out' "$MOCK_CALLS" | head -n 2 | tr '\n' '|')" \
+    "the reserve carrying the traffic is probed right after his pick"
+assert_eq "" "$(grep set_group_proxy "$MOCK_CALLS")" \
+    "a live reserve is kept, never traded for another live node"
+assert_eq "$NL" "$(sec main failover)" "so the failover stays where it was"
+
+# only a reserve that died too sends the probe on to the other nodes
+MOCK_DEAD='main-3-out main-1-out'
+podkop-sub check > /dev/null 2>&1
+assert_eq "main-2-out" "$(now_at)" "a dead reserve is replaced by the next node that answers"
+assert_eq "$N2" "$(sec main failover)" "which becomes the reserve"
+MOCK_DEAD='main-3-out'
 
 # his node answers again
 MOCK_DEAD=''
@@ -170,7 +190,8 @@ assert_cmd "a candidate that does not answer the probe is named and skipped" \
 assert_cmd "the next one is the node that gets borrowed" \
     grep -qF "main: every node is dead, borrowing $DE from the subscription" "$LOG"
 assert_eq "$DE" "$(sec main added)" "state.json records which node is ours, not his"
-assert_eq "2" "$(probes)" "the scan stops at the first candidate that answers"
+assert_eq "2" "$(grep -c '^curl probe node[23]\.' "$MOCK_CALLS")" \
+    "the scan stops at the first candidate that answers"
 assert_eq "" "$(grep 'curl probe node7' "$MOCK_CALLS")" "the candidates behind it are never probed"
 assert_eq "1" "$(grep -c 'podkop-init restart' "$MOCK_CALLS")" \
     "borrowing a node restarts podkop exactly once"
@@ -238,8 +259,8 @@ MOCK_DELAY=fail
 export MOCK_DELAY
 podkop-sub check > /dev/null 2>&1
 assert_eq "0" "$?" "check exits 0 with every node down"
-assert_eq "4" "$(pings)" "max_failures caps the pings in one pass"
-assert_eq "0" "$(fetches)" "a section that was not probed to the end is not worth a fetch"
+assert_eq "8" "$(pings)" "max_failures caps the nodes a pass tries, each asked once more for the fresh list"
+assert_eq "2" "$(fetches)" "each subscription is re-read once a pass, however many sections it feeds"
 assert_eq "" "$(grep 'podkop-init restart' "$MOCK_CALLS")" \
     "an unchanged subscription does not restart podkop"
 assert_eq "fail fail" "$(jq -r '[.sections[].status] | join(" ")' "$STATE")" \
@@ -254,15 +275,16 @@ assert_eq "selector" "$(uci -q get podkop.main.proxy_config_type)" "podkop is le
 reset main-1-out
 before=$(uci -q get podkop.main.selector_proxy_links)
 MOCK_DELAY=fail
-MOCK_BODY_plain=alt
-MOCK_BODY_alt=plain
-export MOCK_DELAY MOCK_BODY_plain MOCK_BODY_alt
+MOCK_BODY_plain=moved
+export MOCK_DELAY MOCK_BODY_plain
 podkop-sub check > /dev/null 2>&1
 assert_eq "0" "$?" "check exits 0 when the content changed under it"
-assert_cmd "a section with nothing left to run on says why it re-reads its subscriptions" \
-    grep -qF "main: nothing answered, re-reading the subscriptions" "$LOG"
-assert_eq "10" "$(grep -c 'get_proxy_latency main-' "$MOCK_CALLS")" \
-    "every link is tried, then every link of the list that replaced it"
+assert_cmd "a dead section says why it re-reads its subscriptions" \
+    grep -qF "main: re-reading its subscriptions, podkop stays as it is" "$LOG"
+assert_cmd "and which node got a fresh link that answers" \
+    grep -qF "main: $DE answers with the fresh link, applying it" "$LOG"
+assert_eq "12" "$(grep -c 'get_proxy_latency main-' "$MOCK_CALLS")" \
+    "every link is tried, the unchanged ones before DE once more, then every link of the new list"
 assert_contains "$(cat "$MOCK_CALLS")" "podkop-init restart" \
     "changed subscription content is applied and podkop restarted"
 assert_cmd "the section's links actually changed" \
@@ -270,6 +292,101 @@ assert_cmd "the section's links actually changed" \
 assert_cmd "with nothing left to borrow, the section is left alone" \
     grep -q 'the subscription offers nothing else' "$LOG"
 assert_eq "fail" "$(sec main status)" "a section whose every node is dead is fail"
+
+# ------------------------------------------------ his node moved while a reserve still answers
+
+# DE moved: the reserve takes the traffic, podkop restarts only once the new link answers
+reset main-3-out
+MOCK_DEAD='main-3-out'
+MOCK_BODY_plain=moved
+MOCK_TCP_DEAD='node9.example.net:443'
+export MOCK_DEAD MOCK_BODY_plain MOCK_TCP_DEAD
+podkop-sub check > /dev/null 2>&1
+assert_eq "main-1-out" "$(now_at)" "the traffic moves to the first node that answers"
+assert_cmd "his node's new link is probed without podkop" \
+    grep -qF 'curl probe node9.example.net:443' "$MOCK_CALLS"
+assert_cmd "a fresh link that does not answer either is logged" \
+    grep -qF "main: $DE is not reachable by TCP either" "$LOG"
+assert_eq "" "$(grep 'podkop-init restart' "$MOCK_CALLS")" "and costs no podkop restart"
+assert_eq "$NL" "$(sec main failover)" "the section waits on the reserve for the next pass"
+
+MOCK_TCP_DEAD=''
+: > "$MOCK_CALLS"
+: > "$LOG"
+podkop-sub check > /dev/null 2>&1
+assert_eq "main: $DE did not answer|main: re-reading its subscriptions, podkop stays as it is|main: $DE answers with the fresh link, applying it|main: $DE answered in 42 ms|main: $DE answers again, the selector is back on it|" \
+    "$(grep -F -e "main: $DE" -e 'main: re-reading' "$LOG" | cut -d' ' -f3- | tr '\n' '|')" \
+    "once the new link answers, podkop gets it and the selector comes back to his node"
+assert_eq "1" "$(grep -c 'podkop-init restart' "$MOCK_CALLS")" \
+    "podkop restarts exactly once, for the link that answered"
+assert_eq "main-1-out" "$(now_at)" "the selector is on his node at its new place"
+assert_eq "" "$(sec main failover)" "and the reserve is let go"
+
+: > "$MOCK_CALLS"
+podkop-sub check > /dev/null 2>&1
+assert_eq "0" "$(fetches)" "with his node back, the next pass fetches nothing"
+unset MOCK_BODY_plain
+MOCK_DEAD=''
+
+# ---------------------------------------------------------------- the same link, and it is back
+
+# the server came back mid-pass under the link podkop already has: podkop is asked, nothing applied
+reset main-3-out
+MOCK_DEAD_ONCE='main-3-out'
+export MOCK_DEAD_ONCE
+podkop-sub check > /dev/null 2>&1
+assert_cmd "the unchanged link is probed without podkop first" \
+    grep -qF 'curl probe node3.example.net:443' "$MOCK_CALLS"
+assert_cmd "then podkop confirms the server is back" \
+    grep -qF "main: $DE is reachable again, podkop gets through" "$LOG"
+assert_eq "main-3-out" "$(now_at)" "the selector returns from the reserve to his node"
+assert_eq "" "$(sec main failover)" "and the reserve is let go"
+assert_eq "" "$(grep 'podkop-init restart' "$MOCK_CALLS")" "without an apply or a restart"
+unset MOCK_DEAD_ONCE
+
+# ---------------------------------------------------------------- a dead section, a new UDP link
+
+# hy2 cannot be probed over TCP, but a dead section has nothing to lose
+reset main-1-out
+MOCK_DELAY=fail
+MOCK_BODY_alt=moved-alt
+export MOCK_DELAY MOCK_BODY_alt
+podkop-sub check > /dev/null 2>&1
+assert_cmd "a dead section takes a new link it cannot probe" \
+    grep -qF "main: $FI has a new link that cannot be probed, applying it" "$LOG"
+assert_contains "$(uci -q get podkop.main.selector_proxy_links)" "node17.example.net" \
+    "so the moved UDP node reaches podkop"
+unset MOCK_DELAY MOCK_BODY_alt
+
+# ---------------------------------------------------------------- his node is never borrowed
+
+# his own node under a new link is still his, not a candidate to borrow
+reset main-1-out
+MOCK_DELAY=fail
+MOCK_BODY_plain=moved
+MOCK_TCP_DEAD='node9.example.net:443'
+export MOCK_DELAY MOCK_BODY_plain MOCK_TCP_DEAD
+podkop-sub check > /dev/null 2>&1
+assert_cmd "his moved node that does not answer stays out of the section" \
+    grep -qF "main: the subscription offers nothing else" "$LOG"
+assert_eq "" "$(grep -F "$DE is not reachable, skipping it" "$LOG")" \
+    "and is never looked at as a node to borrow"
+unset MOCK_DELAY MOCK_BODY_plain
+MOCK_TCP_DEAD=''
+
+# ---------------------------------------------------------------- a urltest section routes itself
+
+# one live node is enough for urltest: no fetch, no restart
+reset main-1-out
+uci set podkop-sub.main.mode=urltest
+uci commit podkop-sub
+podkop-sub apply > /dev/null 2>&1
+: > "$MOCK_CALLS"
+MOCK_DEAD='main-1-out main-2-out main-3-out main-4-out'
+podkop-sub check > /dev/null 2>&1
+assert_eq "0" "$(fetches)" "a urltest section with a live node fetches nothing"
+assert_eq "" "$(grep 'podkop-init restart' "$MOCK_CALLS")" "and restarts nothing"
+MOCK_DEAD=''
 
 # ------------------------------------------- the dead section's own subscriptions, and no others
 
@@ -295,8 +412,8 @@ export MOCK_DELAY MOCK_HTTP_CODE
 podkop-sub check > /dev/null 2>&1
 assert_eq "0" "$?" "check exits 0 when every subscription fails to download"
 assert_cmd "the download failure is logged" grep -q 'http 502' "$LOG"
-assert_eq "5" "$(grep -c 'get_proxy_latency main-' "$MOCK_CALLS")" \
-    "a fetch that failed changes nothing, so nothing is probed a second time"
+assert_eq "9" "$(grep -c 'get_proxy_latency main-' "$MOCK_CALLS")" \
+    "a failed fetch leaves the old links: podkop is asked once more only for those TCP answers"
 assert_eq "$before" "$(uci -q get podkop.main.selector_proxy_links)" \
     "podkop keeps the list it is running on"
 assert_eq "" "$(grep 'podkop-init restart' "$MOCK_CALLS")" "and is not restarted"
@@ -315,7 +432,7 @@ assert_eq "$DE" "$(jq -r '[.subs[].missing[]?] | join("")' "$STATE")" \
     "the provider dropped a chosen node"
 unset MOCK_BODY_plain
 : > "$LOG"
-# the name comes back with the fetch, and only a section with nothing left to run on fetches
+# the name comes back with the fetch, and only a section whose node died fetches
 MOCK_DELAY=fail
 export MOCK_DELAY
 podkop-sub check > /dev/null 2>&1
@@ -429,6 +546,17 @@ assert_eq "" "$(grep -F 'is not reachable' "$LOG")" \
 assert_cmd "it is borrowed like any other live node" \
     grep -qF "main: every node is dead, borrowing $N2_LOG from the subscription" "$LOG"
 assert_eq "$N2" "$(sec main added)" "and it is the node that ends up in the section"
+
+# his pick is still dead, but his other node wins over the borrowed reserve
+MOCK_DEAD='main-1-out'
+MOCK_TCP_SILENT=''
+: > "$MOCK_CALLS"
+podkop-sub check > /dev/null 2>&1
+assert_eq "" "$(sec main added)" "any of his own nodes answering drops the borrowed one"
+assert_eq "$SG" "$(sec main failover)" "and carries the traffic until his pick is back"
+assert_eq "1" "$(grep -c 'podkop-init restart' "$MOCK_CALLS")" \
+    "dropping it is the only podkop restart of the pass"
+MOCK_DEAD=''
 
 # ------------------------------------------------- the pick the user dropped from his node list
 

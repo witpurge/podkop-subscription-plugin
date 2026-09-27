@@ -3,15 +3,19 @@
 # shellcheck disable=SC2016 # single-quoted jq filters use jq's own $vars, not the shell's
 # podkop-sub: keeping the traffic on a node that answers
 
-# <count> <index to try first> <index to try last> - every index once, 0 meaning no preference
+# <count> <index to try last> <indexes to try first...> - every index once, 0 meaning none
 probe_order() {
-    local i=1
-    [ "$2" -ge 1 ] && [ "$2" -le "$1" ] && [ "$2" != "$3" ] && printf '%s ' "$2"
-    while [ "$i" -le "$1" ]; do
-        [ "$i" = "$2" ] || [ "$i" = "$3" ] || printf '%s ' "$i"
+    local n="$1" last="$2" i
+    shift 2
+    for i in "$@"; do
+        [ "$i" -ge 1 ] && [ "$i" -le "$n" ] && [ "$i" != "$last" ] && printf '%s ' "$i"
+    done
+    i=1
+    while [ "$i" -le "$n" ]; do
+        case " $* $last " in *" $i "*) ;; *) printf '%s ' "$i" ;; esac
         i=$((i + 1))
     done
-    [ "$3" -ge 1 ] && [ "$3" -le "$1" ] && printf '%s ' "$3"
+    [ "$last" -ge 1 ] && [ "$last" -le "$n" ] && printf '%s ' "$last"
     return 0
 }
 
@@ -41,20 +45,22 @@ mark_section() {
          | if (.sections[$s] | '"$HEALTH"') == "ok" then del(.sections[$s].health_ack) else . end'
 }
 
-# <link> <seconds> - is there a TCP socket at the endpoint? 2 when the link cannot be probed.
+# <link> - is there a TCP socket at the endpoint? 2 when the link cannot be probed.
 # curl's exit code cannot answer this: a server that accepts the connection and then stays silent
 # times out with 28, exactly like one that was never reachable. time_connect separates them - it is
 # zero only when the handshake itself never completed. A silent socket is what a VLESS endpoint
 # looks like when curl speaks MQTT at it, so this is the common case, not an edge one.
 tcp_up() {
-    local hp t
+    local hp t secs
     # hy2/hysteria2 are UDP: there is nothing to connect to, and "cannot tell" is not "dead"
     case "$1" in hy2://* | hysteria2://*) return 2 ;; esac
     hp=$(link_hostport "$1")
     case "$hp" in *:*) ;; *) return 2 ;; esac
+    secs=$((($(setting ping_timeout 2000) + 999) / 1000))
+    [ "$secs" -ge 1 ] || secs=1
     # mqtt:// is the cheapest plain-TCP scheme this curl has: telnet:// is not compiled in
     t=$(curl -sk -o /dev/null -w '%{time_connect}' \
-        --connect-timeout "$2" --max-time "$(($2 + 1))" "mqtt://$hp" 2> /dev/null)
+        --connect-timeout "$secs" --max-time "$((secs + 1))" "mqtt://$hp" 2> /dev/null)
     # any non-zero digit means the connect completed, whatever separator the build prints
     case "$(printf '%s' "$t" | tr -dc '0-9')" in
         *[1-9]*) return 0 ;;
@@ -64,14 +70,13 @@ tcp_up() {
 
 # the first node the section's subscriptions offer that it does not carry and that TCP answers
 emergency_link() {
-    local s="$1" f="$2" id l secs
-    secs=$((($(setting ping_timeout 2000) + 999) / 1000))
-    [ "$secs" -ge 1 ] || secs=1
+    local s="$1" f="$2" id l
     for id in $(section_subs "$s"); do
         [ -s "$CACHE_DIR/$id.lst" ] || continue
         while IFS= read -r l; do
-            grep -Fxq "$l" "$f" && continue
-            tcp_up "$l" "$secs"
+            # by name: a fresh cache may hold his own nodes under new links
+            [ "$(link_index "$f" "$(link_name "$l")")" -gt 0 ] && continue
+            tcp_up "$l"
             case "$?" in
                 0)
                     printf '%s\n' "$l"
@@ -113,23 +118,63 @@ drop_emergency() {
     wait_for_group "$s" "$RESTORE_WAIT"
 }
 
-# <section> <its links> - nothing in the section answers, so re-read the subscriptions feeding
-# it and apply. 1 when the links did not change: the same list is still the same dead nodes.
-refresh_section() {
-    local s="$1" id
-    log "$s: nothing answered, re-reading the subscriptions"
+# <section> <its links> <dead links> [<nothing else answers>] - 0 when a fresh fetch revives one
+fresh_node() {
+    local s="$1" f="$2" fresh="$CHECKTMP/fresh.$1" id old name i new hit=''
+    [ -s "$3" ] || return 1
+    log "$s: re-reading its subscriptions, podkop stays as it is"
     for id in $(section_subs "$s"); do
+        # once a pass per subscription, however many sections it feeds
+        [ -e "$CHECKTMP/fetched.$id" ] && continue
+        : > "$CHECKTMP/fetched.$id"
         cmd_update "$id"
     done
+    for id in $(section_subs "$s"); do cat "$CACHE_DIR/$id.lst" 2> /dev/null; done > "$fresh"
+    while IFS= read -r old; do
+        name=$(link_name "$old")
+        i=$(link_index "$fresh" "$name")
+        [ "$i" -gt 0 ] || continue
+        new=$(sed -n "${i}p" "$fresh")
+        tcp_up "$new"
+        case "$?" in
+            0) ;;
+            2)
+                # nothing else runs, so a new link we cannot check is still worth a restart
+                if [ -n "$4" ] && [ "$new" != "$old" ]; then
+                    log "$s: $(safe_name "$name") has a new link that cannot be probed, applying it"
+                    hit=1
+                    break
+                fi
+                log "$s: $(safe_name "$name") cannot be probed, leaving it"
+                continue
+                ;;
+            *)
+                log "$s: $(safe_name "$name") is not reachable by TCP either"
+                continue
+                ;;
+        esac
+        if [ "$new" != "$old" ]; then
+            log "$s: $(safe_name "$name") answers with the fresh link, applying it"
+            hit=1
+            break
+        fi
+        # podkop already carries this very link, so it can tell whether the server is back
+        i=$(link_index "$f" "$name")
+        if ping_node "$s" "$i" "$(setting ping_timeout 2000)" < /dev/null; then
+            log "$s: $(safe_name "$name") is reachable again, podkop gets through in $PING_MS ms"
+            return 0
+        fi
+        log "$s: $(safe_name "$name") is reachable, but podkop still cannot get through it"
+    done < "$3"
+    [ -n "$hit" ] || return 1
     cmd_apply
-    [ "$(current_links "$s")" != "$(cat "$2")" ] || return 1
     wait_for_group "$s" "$RESTORE_WAIT" || log "$s: podkop's proxy groups did not come back"
 }
 
 # probe the node that carries the traffic, fail over when it dies, come back when it revives
 check_section() {
     local s="$1" to="$2" maxf="$3" again="${4:-}"
-    local f n mode sel fail add add_i fail_i sel_i now order name win
+    local f n mode sel fail add add_i fail_i sel_i now order name win dead i
     if ! uci -q get "podkop.$s" > /dev/null 2>&1; then
         log "section $s is gone from podkop, dropping it"
         forget_section "$s"
@@ -171,23 +216,37 @@ check_section() {
         fail_i=0
     fi
 
-    # while the selector sits where we put it, the user's own nodes are what the probe is for
-    if [ "$mode" = selector ] && [ "$fail_i" -gt 0 ]; then
-        order=$(probe_order "$n" "$sel_i" "$fail_i")
+    # a borrowed reserve goes last: any of his own nodes that answers wins over it
+    if [ "$mode" = selector ] && [ "$fail_i" -gt 0 ] && [ "$fail_i" = "$add_i" ]; then
+        order=$(probe_order "$n" "$fail_i" "$sel_i")
+    # his pick first, then the reserve: trading one live reserve for another only drops connections
+    elif [ "$mode" = selector ] && [ "$fail_i" -gt 0 ]; then
+        order=$(probe_order "$n" 0 "$sel_i" "$fail_i")
     elif [ "$mode" != selector ] && [ "$add_i" -gt 0 ]; then
-        order=$(probe_order "$n" 0 "$add_i")
+        order=$(probe_order "$n" "$add_i")
     elif [ "$mode" = selector ]; then
-        order=$(probe_order "$n" "$now" 0)
+        order=$(probe_order "$n" 0 "$now")
     else
         # a urltest section picks for itself; there is no "current" node to start from
-        order=$(probe_order "$n" "$(awk -v n="$n" 'BEGIN { srand(); print int(rand() * n) + 1 }')" 0)
+        i=$(awk -v n="$n" 'BEGIN { srand(); print int(rand() * n) + 1 }')
+        order=$(probe_order "$n" 0 "$i")
     fi
 
     # shellcheck disable=SC2086 # the order is a list of indexes: word splitting is the point
-    if ! probe_indexes "$s" "$f" "$to" "$maxf" $order; then
+    probe_indexes "$s" "$f" "$to" "$maxf" $order
+    # for the fresh fetch: his first node if a reserve answered, every node tried if none did
+    dead="$CHECKTMP/dead.$s"
+    : > "$dead"
+    # shellcheck disable=SC2086 # echo squeezes the list, so cut counts one index per field
+    for i in $(echo $order | cut -d' ' -f"1-$PROBE_TRIED"); do
+        [ "$i" != "$PROBE_WIN" ] || break
+        # the borrowed node is not his to bring back
+        [ "$i" = "$add_i" ] || sed -n "${i}p" "$f" >> "$dead"
+        [ "$PROBE_WIN" = 0 ] || break
+    done
+    if [ "$PROBE_WIN" = 0 ]; then
         log "$s: no node answered ($PROBE_TRIED of $n tried)"
-        # only a section with nothing left to run on is worth a fetch and podkop's restart
-        if [ -z "$again" ] && [ "$PROBE_TRIED" -ge "$n" ] && refresh_section "$s" "$f"; then
+        if [ -z "$again" ] && fresh_node "$s" "$f" "$dead" 1; then
             check_section "$s" "$to" "$maxf" 1
             return 0
         fi
@@ -213,6 +272,8 @@ check_section() {
     # every link but the borrowed one is the user's, so a win elsewhere means his side is back
     if [ -n "$add" ] && [ "$win" != "$add_i" ]; then
         drop_emergency "$s" "$add"
+        # that was this pass's restart; his node gets its fresh look on the next one
+        : > "$dead"
         current_links "$s" > "$f"
         win=$(link_index "$f" "$name")
         now=0
@@ -232,6 +293,10 @@ check_section() {
         forget_failover "$s"
     fi
     mark_section "$s" ok 0
+    # selector only: urltest routes around a dead node by itself
+    if [ "$mode" = selector ] && [ -z "$again" ] && fresh_node "$s" "$f" "$dead"; then
+        check_section "$s" "$to" "$maxf" 1
+    fi
     return 0
 }
 
@@ -246,7 +311,7 @@ cmd_check() {
     [ "$maxf" -ge 1 ] || maxf=1
     CHECK_ADDED=''
     CHECKTMP=$(mktemp -d) || return 1
-    # a pass only probes; a section left with nothing to run on re-reads its own subscriptions
+    # a pass only probes; a section whose node died re-reads its own subscriptions
     for s in $(state_json | jq -r '.sections | keys[]?'); do
         check_section "$s" "$timeout" "$maxf"
     done

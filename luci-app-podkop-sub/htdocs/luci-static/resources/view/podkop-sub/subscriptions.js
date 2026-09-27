@@ -554,7 +554,7 @@ function settingsTab(map) {
     form.Value,
     "max_failures",
     _("Max failures"),
-    _("Failed checks in a row before the section is refreshed."),
+    _("How many nodes may fail in one check before it stops probing."),
   );
   maxFailures.datatype = "uinteger";
   maxFailures.default = "5";

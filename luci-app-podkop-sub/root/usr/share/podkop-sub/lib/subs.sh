@@ -32,9 +32,11 @@ update_one() {
 
     hdrs="$RUNTMP/$id.hdr"
     body="$RUNTMP/$id.body"
-    # -k: panels often sit on an IP with a self-signed certificate
-    now=$(curl -skL --max-time 20 --retry 2 -A "$ua" -D "$hdrs" -o "$body" \
-        -w '%{http_code}' "$url" 2> /dev/null)
+    if ! now=$(curl -sL --max-time 20 --retry 2 -A "$ua" -D "$hdrs" -o "$body" \
+        -w '%{http_code}' "$url" 2> /dev/null); then
+        sub_error "$id" "$host" "download failed" "$url"
+        return 0
+    fi
     case "$now" in
         2??) ;;
         *)
@@ -156,9 +158,60 @@ collect_links() {
     done
 }
 
+podkop_changes_clear() {
+    local changes
+    changes=$(uci changes podkop) || {
+        log "could not read pending podkop changes"
+        return 1
+    }
+    [ -z "$changes" ] || {
+        log "podkop has pending changes, save or revert them first"
+        return 1
+    }
+}
+
+snapshot_apply() {
+    cp -p /etc/config/podkop "$RUNTMP/podkop" || return 1
+    cp -Rp "$BACKUP_DIR" "$RUNTMP/backup" || return 1
+    [ ! -e "$STATE" ] || cp -p "$STATE" "$RUNTMP/state.json"
+}
+
+rollback_apply() {
+    local restart="$1" state_ok=1
+    if ! uci -q revert podkop || ! cp -p "$RUNTMP/podkop" /etc/config/podkop; then
+        log "could not restore podkop config; snapshot kept in $RUNTMP"
+        return 1
+    fi
+    if ! rm -f "$BACKUP_DIR"/*.uci || ! cp -Rp "$RUNTMP/backup/." "$BACKUP_DIR/"; then
+        log "could not restore section backups; snapshot kept in $RUNTMP"
+        return 1
+    fi
+    if [ -e "$RUNTMP/state.json" ]; then
+        cp -p "$RUNTMP/state.json" "$STATE" || state_ok=''
+    else
+        rm -f "$STATE" || state_ok=''
+    fi
+    if [ -z "$state_ok" ]; then
+        log "could not restore plugin state; snapshot kept in $RUNTMP"
+        return 1
+    fi
+    if [ -n "$restart" ] && ! /etc/init.d/podkop restart; then
+        log "config restored but podkop restart failed; snapshot kept in $RUNTMP"
+        return 1
+    fi
+    log "previous podkop config and plugin state restored"
+    rm -rf "$RUNTMP"
+}
+
 apply_locked() {
     local force="$1" f s targets='' n pending='' extra
+    podkop_changes_clear || return 1
     RUNTMP=$(mktemp -d) || return 1
+    snapshot_apply || {
+        log "could not snapshot podkop config and plugin state"
+        rm -rf "$RUNTMP"
+        return 1
+    }
     config_foreach collect_links subscription "$RUNTMP"
 
     for f in "$RUNTMP"/sec.*; do
@@ -200,10 +253,14 @@ apply_locked() {
 
     uci commit podkop || {
         log "uci commit podkop failed"
-        rm -rf "$RUNTMP"
+        rollback_apply ''
         return 1
     }
-    /etc/init.d/podkop restart
+    /etc/init.d/podkop restart || {
+        log "podkop restart failed"
+        rollback_apply restart
+        return 1
+    }
     log "podkop restarted for${targets:- none}"
 
     for s in $targets; do
@@ -238,6 +295,7 @@ cmd_apply() {
 
 restore_locked() {
     local target="$1" f s
+    podkop_changes_clear || return 1
     for f in "$BACKUP_DIR"/*.uci; do
         [ -f "$f" ] || continue
         s=${f##*/}

@@ -1,9 +1,9 @@
 # Dev stand image: the test stand plus podkop's release packages and LuCI.
 ARG BASE=podkop-sub-test:latest
 FROM ${BASE}
-ARG PODKOP_VERSION=0.7.22
+ARG PODKOP_VERSION=0.7.24
 
-# 24.10 installs the .ipk assets with opkg, 25.12 the .apk ones with apk
+# 24.10 installs the .ipk assets with opkg, 25.12 the .apk ones with apk; the baked index goes stale
 RUN set -e; \
     mkdir -p /tmp/dl && cd /tmp/dl; \
     R=https://github.com/itdoginfo/podkop/releases/download/$PODKOP_VERSION; \
@@ -13,6 +13,7 @@ RUN set -e; \
                  luci-i18n-podkop-ru-$PODKOP_VERSION.apk; do \
             wget -q -O "$f" "$R/$f"; \
         done; \
+        apk update > /dev/null 2>&1; \
         apk add --allow-untrusted --force-broken-world ./*.apk > /dev/null 2>&1 || true; \
         apk add luci > /dev/null 2>&1; \
     else \
@@ -21,6 +22,7 @@ RUN set -e; \
                  luci-i18n-podkop-ru-$PODKOP_VERSION.ipk; do \
             wget -q -O "$f" "$R/$f"; \
         done; \
+        opkg update > /dev/null 2>&1; \
         opkg install --force-depends ./*.ipk > /dev/null 2>&1 || true; \
         opkg install luci > /dev/null 2>&1; \
     fi; \

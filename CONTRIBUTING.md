@@ -103,7 +103,7 @@ One file decides it:
 
 ```
 luci-app-podkop-sub/root/usr/share/podkop-sub/version
-    TARGET_PODKOP='0.7.22'
+    TARGET_PODKOP='0.7.24'
 ```
 
 Change that line and everything follows: the build stamps it into every package name, `install.sh`

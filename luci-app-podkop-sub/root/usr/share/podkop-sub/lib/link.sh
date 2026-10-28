@@ -30,11 +30,17 @@ decode_body() {
     return 0
 }
 
+# podkop 0.7.24 aborts on an xhttp link unless sing-box reports it can decode the link itself
+can_decode_link() { sing-box version 2> /dev/null | grep -Eq '^Features:.*[ ,]tools\.decode-link(,|$)'; }
+
 # stdin -> stdout: only lines that start with a scheme podkop can build an outbound from
 filter_links() {
+    local xhttp='^(vless|trojan)://[^#]*[?&]type=(xhttp|splithttp)(&|#|$)'
+    can_decode_link && xhttp='^$'
     tr -d '\r' |
         sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
-        grep -E "^($(echo "$SUPPORTED_SCHEMES" | tr ' ' '|'))://"
+        grep -E "^($(echo "$SUPPORTED_SCHEMES" | tr ' ' '|'))://" |
+        grep -Ev "$xhttp"
     return 0
 }
 

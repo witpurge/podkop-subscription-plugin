@@ -39,6 +39,18 @@ dup=$(printf 'trojan://p@h.example.net:443#one\ntrojan://p@h.example.net:443#one
     parse_subscription)
 assert_eq "trojan://p@h.example.net:443#one" "$dup" "identical links collapse into one"
 
+xh='vless://u@h.example.net:443?security=tls&type=xhttp&path=/x#xh
+trojan://p@h.example.net:443?type=splithttp#sh
+vless://u@h.example.net:443?type=ws#name-type=xhttp'
+assert_eq "vless://u@h.example.net:443?type=ws#name-type=xhttp" \
+    "$(printf '%s\n' "$xh" | filter_links)" \
+    "xhttp links are dropped while sing-box cannot decode them (podkop would abort)"
+can_decode_link() { return 0; }
+assert_eq "$xh" "$(printf '%s\n' "$xh" | filter_links)" \
+    "xhttp links are kept once sing-box reports tools.decode-link"
+unset -f can_decode_link
+. luci-app-podkop-sub/root/usr/share/podkop-sub/lib/link.sh
+
 # --- sanitize_link / link_name
 
 first=$(printf '%s\n' "$plain" | sed -n 1p)
